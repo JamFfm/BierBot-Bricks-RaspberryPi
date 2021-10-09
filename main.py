@@ -3,11 +3,14 @@ import logging
 import sys
 import time
 import json
-import yaml # reading the config
+import yaml  # reading the config
 import os
 import RPi.GPIO as GPIO 
 from w1thermsensor import W1ThermSensor
-
+from RPLCD.i2c import CharLCD   # LCD
+import socket                   # IP
+import fcntl                    # IP
+import struct                   # IP
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -19,9 +22,11 @@ logging.getLogger().addHandler(logging.StreamHandler())
 APIKEY = "tbd"
 TYPE = "RaspberryPi"
 CHIPID = "tbd"
+CHARMAP = "A00"     # LCD
+ADDRESS = int("0x27", 16)
 
 # Open the file and load the file
-config = {} # will hold the config from bricks.yaml and cache local relay states
+config = {}  # will hold the config from bricks.yaml and cache local relay states
 with open('./bricks.yaml') as f:
     config = yaml.load(f, Loader=SafeLoader)
     logging.info("read config")
@@ -34,6 +39,14 @@ with open('./bricks.yaml') as f:
     
 
 GPIO.setwarnings(False)
+
+try:
+    lcd = CharLCD(i2c_expander='PCF8574', address=ADDRESS, port=1, cols=20, rows=4, dotsize=8, charmap=CHARMAP,
+                  auto_linebreaks=True, backlight_enabled=True)
+except:
+    logging.info("Error LCD, can not be initialized")
+pass
+
 def initRelays():
     logging.info("setting GPIO to GPIO.BOARD")
     GPIO.setmode(GPIO.BOARD) 
@@ -67,11 +80,40 @@ def setRelay(number=0, state=0):
         
         
 def getRelay(number=0):
-    return config["relays"][number]["state"] # TODO: get from GPIO?
-    
+    return config["relays"][number]["state"]  # TODO: get from GPIO?
+
+
+def set_ip():
+    if get_ip('wlan0') != 'Not connected':
+        ip = get_ip('wlan0')
+    elif get_ip('eth0') != 'Not connected':
+        ip = get_ip('eth0')
+    elif get_ip('enxb827eb488a6e') != 'Not connected':
+        ip = get_ip('enxb827eb488a6e')
+    else:
+        ip = 'Not connected'
+    pass
+    return ip
+
+
+def get_ip(interface):
+    ip_addr = 'Not connected'
+    so = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        ip_addr = socket.inet_ntoa(
+            fcntl.ioctl(so.fileno(), 0x8915, struct.pack('256s', bytes(interface.encode())[:15]))[20:24])
+    except Exception as e:
+        logging.warning('no ip found')
+        logging.warning(e)
+        return ip_addr
+    finally:
+        pass
+    return ip_addr
+
+
 def request():
 
-    logging.info("starting request");
+    logging.info("starting request")
     url = 'https://brewbricks.com/api/iot/v1'
 
     # craft request
@@ -81,7 +123,7 @@ def request():
         "version": "0.1",
         "chipid": CHIPID,
         "apikey": APIKEY
-    } # baseline
+    }  # baseline
     # add relay states to request
     for i in range(0, len(config["relays"])):
         key = f"a_bool_epower_{i}"
@@ -104,8 +146,8 @@ def request():
     
     try:
         if response.text == "internal.":
-            logging.info("please activate RasberryPi under https://bricks.bierbot.com > Bricks")
-            time.sleep(nextRequestMs / 1000)
+            logging.info("please activate RaspberryPi under https://bricks.bierbot.com > Bricks")
+            # time.sleep(nextRequestMs / 1000)
         else:
             jsonResponse = json.loads(response.text)
 
@@ -114,26 +156,45 @@ def request():
             # set relays based on response
             for i in range(0, len(config["relays"])):
                 relay_key = f"epower_{i}_state"
-                if (relay_key in jsonResponse):
+                if relay_key in jsonResponse:
                     # relay_key is e.g. "epower_0_state"
                     new_relay_state = int(jsonResponse[relay_key])
                     logging.info(f"received new target state {new_relay_state} for {relay_key}")
                     setRelay(i, new_relay_state)
                 else:
-                    logging.warning(f"relay key {relay_key} for relay idx={i} was expected but not in response. This is normal before activation.")
+                    logging.warning(f"relay key {relay_key} for relay idx={i} was expected but "
+                                    f"not in response. This is normal before activation.")
                     setRelay(i, 0)
 
             logging.info(f"sleeping for {nextRequestMs}ms")
-            time.sleep(nextRequestMs / 1000)
+            time.sleep(nextRequestMs / 250)  # ursprünglich 1000
     except:
         logging.warning("failed processing request: " + response.text)
         time.sleep(60)
 
+
 def run():
+    # Display First Test
+    line1 = 'Beer Bot Bricks LCD '
+    line2 = '--------------------'
+    line3 = set_ip()
+    line4 = '--------------------'
+
+    lcd._set_cursor_mode('hide')
+    lcd.cursor_pos = (0, 0)
+    lcd.write_string(line1.ljust(20))
+    lcd.cursor_pos = (1, 0)
+    lcd.write_string(line2.ljust(20))
+    lcd.cursor_pos = (2, 0)
+    lcd.write_string(line3.ljust(20))
+    lcd.cursor_pos = (3, 0)
+    lcd.write_string(line4.ljust(20))
+
     initRelays()
 
     while True:
         request()
+
 
 if __name__ == '__main__':
     logging.info("BierBot Bricks RaspberryPi client started.")
